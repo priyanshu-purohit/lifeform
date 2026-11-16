@@ -4,19 +4,31 @@ import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { getCameraConsent } from "@/features/privacy/consent";
-import type { SmartSpectraSDK } from "@smartspectra/node-sdk/renderer";
+import {
+  destroySdkMeasurement,
+  startSdkMeasurement,
+  stopSdkMeasurement,
+  type MeasurementStatus,
+  type MetricState,
+} from "@/features/measurements";
+import { useMeasurements } from "@/hooks/use-measurements";
 
 // Camera test: does the laptop's built-in webcam work with the SmartSpectra SDK?
-// Uses only real SDK data. Nothing is recorded or stored.
+// Uses only real SDK data, read from the shared measurement layer. Nothing is recorded.
 //
 // Two stages so SDK credits are not wasted:
 //   1. Camera check (free): open the webcam without the SDK and tune exposure/brightness
 //      until the picture is bright enough AND the camera holds ~30 fps.
 //   2. Measure (uses credits): start the SDK on the already-tuned stream.
 
-const STATUS_NAMES = ["Uninitialized", "Idle", "Starting", "Running", "Stopping", "Error"];
-const STATUS_RUNNING = 3;
-const STATUS_ERROR = 5;
+const STATUS_LABELS: Record<MeasurementStatus, string> = {
+  inactive: "Not started",
+  idle: "Idle",
+  starting: "Starting",
+  running: "Running",
+  stopping: "Stopping",
+  error: "Error",
+};
 
 // The SDK needs a sustained ~25+ fps (target 30). Longer exposure = brighter picture but
 // fewer frames per second; a built-in webcam's sweet spot has to be found by hand.
@@ -39,15 +51,25 @@ type TrackWithStats = MediaStreamTrack & {
   stats?: { deliveredFrames: number; discardedFrames: number; totalFrames: number };
 };
 type FpsReading = { camera: number; dropped: number | null };
-type Reading = { value: number; confidence: number } | null;
 
 // SDK confidence is a percentage in [0, 100] (generated.d.ts: MeasurementWithConfidence).
-// 0 can also mean "not reported yet", since protobuf defaults unset numbers to 0.
-function describeConfidence(c: number): string {
+function describeConfidence(c: number | null): string {
+  if (c == null) return "no confidence reported";
   const pct = Math.round(c);
   if (pct < 30) return `${pct}% confidence (low, still settling)`;
   if (pct < 70) return `${pct}% confidence (fair)`;
   return `${pct}% confidence (good)`;
+}
+
+function describeMetric(m: MetricState, digits: number, unit: string, waiting: string): string {
+  if (!m.latest || m.smoothed == null) return waiting;
+  const parts = [
+    `${m.smoothed.toFixed(digits)} ${unit}`,
+    describeConfidence(m.latest.confidence),
+    m.latest.validity === "unsettled" ? "not yet stable" : null,
+    m.freshness === "stale" ? "stale" : null,
+  ];
+  return parts.filter(Boolean).join(" · ");
 }
 
 // Validation codes from the SDK (constants.js), shown next to the hint for diagnosis.
@@ -108,19 +130,17 @@ function closeCamera(stream: MediaStream | null) {
 export default function CameraSetup() {
   const router = useRouter();
   const videoRef = useRef<HTMLVideoElement>(null);
-  const sdkRef = useRef<SmartSpectraSDK | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const capsRef = useRef<CameraCaps>({});
   const lastPulseRef = useRef(0);
 
+  const measurement = useMeasurements();
+  const { pulseRate, breathingRate, hrvRmssd } = measurement.metrics;
+  const measuring = measurement.session != null && measurement.session.endedAt == null;
+
   const [cameraOn, setCameraOn] = useState(false);
-  const [measuring, setMeasuring] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [status, setStatus] = useState("Not started");
-  const [hint, setHint] = useState("");
   const [error, setError] = useState("");
-  const [pulse, setPulse] = useState<Reading>(null);
-  const [breathing, setBreathing] = useState<Reading>(null);
   const [fps, setFps] = useState<FpsReading | null>(null);
   const [caps, setCaps] = useState<CameraCaps>({});
   const [settings, setSettings] = useState<CameraSettings>({ manual: true });
@@ -133,8 +153,8 @@ export default function CameraSetup() {
 
   useEffect(() => {
     return () => {
-      sdkRef.current?.destroy();
-      sdkRef.current = null;
+      // Leaving setup ends measuring for now, so credits are never spent unseen.
+      destroySdkMeasurement();
       closeCamera(streamRef.current);
       streamRef.current = null;
     };
@@ -191,6 +211,21 @@ export default function CameraSetup() {
       setFps(null);
     };
   }, [cameraOn]);
+
+  // The SDK locks exposure/white balance once Running; reapply our tuned values.
+  useEffect(() => {
+    const track = streamRef.current?.getVideoTracks()[0];
+    if (measurement.status !== "running" || !track) return;
+    const timer = setTimeout(() => {
+      void applySettings(track, capsRef.current, loadSettings() ?? { manual: true }).catch(() => {});
+    }, 500);
+    return () => clearTimeout(timer);
+  }, [measurement.status]);
+
+  // Any new pulse sample counts as "pulse seen" for the credit guard below.
+  useEffect(() => {
+    if (pulseRate.latest) lastPulseRef.current = Date.now();
+  }, [pulseRate.latest]);
 
   // Credit guard: stop a running session that has produced no pulse for too long.
   useEffect(() => {
@@ -277,60 +312,9 @@ export default function CameraSetup() {
     setBusy(true);
     setError("");
     try {
-      if (!window.lifeform) throw new Error("Not running inside the LIFEFORM Electron app.");
-      const apiKey = await window.lifeform.getApiKey();
-      if (!apiKey) throw new Error("SMARTSPECTRA_API_KEY is missing from .env.");
-
-      if (!sdkRef.current) {
-        const { SmartSpectraSDK, breathingMetrics, cardioMetrics } = await import(
-          "@smartspectra/node-sdk/renderer"
-        );
-        const { decodeMetrics } = await import("@smartspectra/node-sdk/messages");
-
-        const sdk = new SmartSpectraSDK({
-          apiKey,
-          requestedMetrics: [...breathingMetrics, ...cardioMetrics],
-          enableTelemetry: false,
-        });
-
-        sdk.on("processingStatus", (s) => {
-          setStatus(STATUS_NAMES[s] ?? String(s));
-          // The SDK locks exposure/white balance once Running; reapply our tuned values.
-          const track = streamRef.current?.getVideoTracks()[0];
-          if (s === STATUS_RUNNING && track) {
-            setTimeout(() => {
-              void applySettings(track, capsRef.current, loadSettings() ?? { manual: true }).catch(
-                () => {},
-              );
-            }, 500);
-          }
-        });
-        sdk.on("validationStatus", (code, _ts, h) =>
-          setHint(code === 0 ? "" : `[${code}${VALIDATION_NAMES[code] ? " " + VALIDATION_NAMES[code] : ""}] ${h}`),
-        );
-        sdk.on("error", (code, message) => setError(`SDK error ${code}: ${message}`));
-        sdk.on("metrics", (buf) => {
-          const m = decodeMetrics(buf);
-          const p = m.cardio?.pulseRate?.at(-1);
-          const b = m.breathing?.rate?.at(-1);
-          if (p?.value != null) {
-            lastPulseRef.current = Date.now();
-            setPulse({ value: p.value, confidence: p.confidence ?? 0 });
-          }
-          if (b?.value != null) setBreathing({ value: b.value, confidence: b.confidence ?? 0 });
-        });
-
-        sdkRef.current = sdk;
-      }
-
-      const sdk = sdkRef.current;
-      // After a terminal error the SDK must be reset before it can start again.
-      if (sdk.processingStatus === STATUS_ERROR) await sdk.reset();
-
       if (!streamRef.current) await openCamera();
-      sdk.useMediaStream(streamRef.current!);
-      await sdk.start();
-      setMeasuring(true);
+      // SDK failures are also published to the shared store (measurement.error).
+      await startSdkMeasurement(streamRef.current!);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -341,15 +325,21 @@ export default function CameraSetup() {
   async function stopMeasuring() {
     setBusy(true);
     try {
-      await sdkRef.current?.stop();
-      setMeasuring(false);
-      setHint("");
+      await stopSdkMeasurement();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
     }
   }
+
+  const guidance = measurement.guidance;
+  const hint = guidance
+    ? `[${guidance.code}${VALIDATION_NAMES[guidance.code] ? " " + VALIDATION_NAMES[guidance.code] : ""}] ${guidance.hint}`
+    : "";
+  const sdkError = measurement.error
+    ? `SDK error${measurement.error.code != null ? ` ${measurement.error.code}` : ""}: ${measurement.error.message}`
+    : "";
 
   const fpsOk = fps != null && fps.camera >= MIN_OK_FPS;
   const manualAvailable = !!caps.exposureMode?.includes("manual") && !!caps.exposureTime;
@@ -444,7 +434,7 @@ export default function CameraSetup() {
 
       <dl className="grid grid-cols-2 gap-x-6 gap-y-1 font-mono text-sm">
         <dt className="text-zinc-500">SDK status</dt>
-        <dd>{status}</dd>
+        <dd>{STATUS_LABELS[measurement.status]}</dd>
         <dt className="text-zinc-500">Camera</dt>
         <dd className={fps != null && !fpsOk ? "text-red-400" : undefined}>
           {fps != null ? `${fps.camera.toFixed(1)} fps` : "—"}
@@ -455,16 +445,16 @@ export default function CameraSetup() {
         <dt className="text-zinc-500">Guidance</dt>
         <dd>{hint || "—"}</dd>
         <dt className="text-zinc-500">Pulse</dt>
-        <dd>{pulse ? `${pulse.value.toFixed(0)} bpm · ${describeConfidence(pulse.confidence)}` : "—"}</dd>
+        <dd>{describeMetric(pulseRate, 0, "bpm", "—")}</dd>
         <dt className="text-zinc-500">Breathing</dt>
-        <dd>
-          {breathing
-            ? `${breathing.value.toFixed(1)} /min · ${describeConfidence(breathing.confidence)}`
-            : "— (needs ~30 s)"}
-        </dd>
+        <dd>{describeMetric(breathingRate, 1, "/min", "— (needs ~30 s)")}</dd>
+        <dt className="text-zinc-500">HRV (RMSSD)</dt>
+        <dd>{describeMetric(hrvRmssd, 0, "ms", "— (only when the SDK reports it)")}</dd>
       </dl>
 
-      {error && <p className="max-w-xl text-center text-sm text-red-400">{error}</p>}
+      {(error || sdkError) && (
+        <p className="max-w-xl text-center text-sm text-red-400">{error || sdkError}</p>
+      )}
     </main>
   );
 }
