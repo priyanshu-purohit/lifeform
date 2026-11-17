@@ -1,5 +1,7 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
+import { Suspense } from "react";
+import { MeasurementLifecycle } from "@/components/measurement-lifecycle";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -24,7 +26,13 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
       lang="en"
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
-      <body className="min-h-full flex flex-col">{children}</body>
+      <body className="min-h-full flex flex-col">
+        {children}
+        {/* Keeps one measurement session alive across routes and switches the camera off when unused. */}
+        <Suspense fallback={null}>
+          <MeasurementLifecycle />
+        </Suspense>
+      </body>
     </html>
   );
 }

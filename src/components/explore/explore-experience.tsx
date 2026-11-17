@@ -8,7 +8,7 @@ import {
   isSimulationRunning,
   setSimulatedSignalLost,
   startSimulation,
-  stopSdkMeasurement,
+  stopMeasurement,
   stopSimulation,
   subscribeSimulation,
   type MeasurementSnapshot,
@@ -145,7 +145,8 @@ export function ExploreExperience() {
       return;
     }
     try {
-      await stopSdkMeasurement();
+      // Ends the session; MeasurementLifecycle then switches the camera off.
+      await stopMeasurement();
     } catch (e) {
       setActionError(e instanceof Error ? e.message : String(e));
     }

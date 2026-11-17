@@ -1,13 +1,23 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { getCameraConsent } from "@/features/privacy/consent";
 import {
-  destroySdkMeasurement,
-  startSdkMeasurement,
-  stopSdkMeasurement,
+  NO_PULSE_TIMEOUT_MS,
+  TARGET_FPS,
+  applyCameraSettings,
+  closeCamera,
+  getCameraCaps,
+  getCameraStream,
+  openCamera,
+  readTrackSettings,
+  saveCameraSettings,
+  startMeasurement,
+  stopMeasurement,
+  subscribeCamera,
+  type CameraSettings,
   type MeasurementStatus,
   type MetricState,
 } from "@/features/measurements";
@@ -20,6 +30,9 @@ import { useMeasurements } from "@/hooks/use-measurements";
 //   1. Camera check (free): open the webcam without the SDK and tune exposure/brightness
 //      until the picture is bright enough AND the camera holds ~30 fps.
 //   2. Measure (uses credits): start the SDK on the already-tuned stream.
+//
+// The camera and session belong to the app (features/measurements), not this page, so a
+// measurement started here keeps running in Explore. The no-pulse credit guard lives there too.
 
 const STATUS_LABELS: Record<MeasurementStatus, string> = {
   inactive: "Not started",
@@ -30,21 +43,9 @@ const STATUS_LABELS: Record<MeasurementStatus, string> = {
   error: "Error",
 };
 
-// The SDK needs a sustained ~25+ fps (target 30). Longer exposure = brighter picture but
-// fewer frames per second; a built-in webcam's sweet spot has to be found by hand.
-const TARGET_FPS = 30;
+// Longer exposure = brighter picture but fewer frames per second; a built-in webcam's sweet
+// spot has to be found by hand.
 const MIN_OK_FPS = 28;
-// Stop a live session that produces no pulse in this time, so a bad run can't burn credits.
-const NO_PULSE_TIMEOUT_MS = 60_000;
-const SETTINGS_KEY = "lifeform.cameraSettings";
-
-type Range = { min: number; max: number; step?: number };
-type CameraCaps = {
-  exposureMode?: string[];
-  exposureTime?: Range;
-  brightness?: Range;
-};
-type CameraSettings = { manual: boolean; exposureTime?: number; brightness?: number };
 
 // Chromium's per-track frame counters (MediaStreamTrackVideoStats); not yet in the TS DOM lib.
 type TrackWithStats = MediaStreamTrack & {
@@ -81,68 +82,27 @@ const VALIDATION_NAMES: Record<number, string> = {
   12: "too much motion",
 };
 
-function loadSettings(): CameraSettings | null {
-  try {
-    const raw = localStorage.getItem(SETTINGS_KEY);
-    return raw ? (JSON.parse(raw) as CameraSettings) : null;
-  } catch {
-    return null;
-  }
-}
-
-function saveSettings(s: CameraSettings) {
-  try {
-    localStorage.setItem(SETTINGS_KEY, JSON.stringify(s));
-  } catch {
-    /* storage unavailable: settings just won't be remembered */
-  }
-}
-
-function snap(value: number, r: Range): number {
-  const step = r.step && r.step > 0 ? r.step : 1;
-  const v = r.min + Math.round((value - r.min) / step) * step;
-  return Math.min(r.max, Math.max(r.min, v));
-}
-
-async function applySettings(track: MediaStreamTrack, caps: CameraCaps, s: CameraSettings) {
-  const set: Record<string, unknown> = {};
-  if (caps.exposureMode?.includes("manual") && caps.exposureTime) {
-    set.exposureMode = s.manual ? "manual" : "continuous";
-    if (s.manual && s.exposureTime != null) set.exposureTime = snap(s.exposureTime, caps.exposureTime);
-  }
-  if (caps.brightness && s.brightness != null) set.brightness = snap(s.brightness, caps.brightness);
-  if (Object.keys(set).length === 0) return;
-  await track.applyConstraints({ advanced: [set as MediaTrackConstraintSet] });
-}
-
-function readSettings(track: MediaStreamTrack) {
-  return track.getSettings() as MediaTrackSettings & {
-    exposureMode?: string;
-    exposureTime?: number;
-    brightness?: number;
-  };
-}
-
-function closeCamera(stream: MediaStream | null) {
-  stream?.getTracks().forEach((t) => t.stop());
+function useCameraStream(): MediaStream | null {
+  return useSyncExternalStore(subscribeCamera, getCameraStream, () => null);
 }
 
 export default function CameraSetup() {
   const router = useRouter();
   const videoRef = useRef<HTMLVideoElement>(null);
-  const streamRef = useRef<MediaStream | null>(null);
-  const capsRef = useRef<CameraCaps>({});
-  const lastPulseRef = useRef(0);
 
   const measurement = useMeasurements();
   const { pulseRate, breathingRate, hrvRmssd } = measurement.metrics;
   const measuring = measurement.session != null && measurement.session.endedAt == null;
+  const sdkMeasuring = measuring && measurement.session?.source === "presage-sdk";
 
-  const [cameraOn, setCameraOn] = useState(false);
+  // The stream is shared app state, so it is still here when returning from Explore.
+  const stream = useCameraStream();
+  const cameraOn = stream != null;
+  const caps = cameraOn ? getCameraCaps() : {};
+
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [fps, setFps] = useState<FpsReading | null>(null);
-  const [caps, setCaps] = useState<CameraCaps>({});
   const [settings, setSettings] = useState<CameraSettings>({ manual: true });
   const [applied, setApplied] = useState("");
 
@@ -151,21 +111,19 @@ export default function CameraSetup() {
     if (!getCameraConsent()) router.replace("/");
   }, [router]);
 
+  // Show the shared stream in the preview (also re-attaches when this route is shown again).
   useEffect(() => {
-    return () => {
-      // Leaving setup ends measuring for now, so credits are never spent unseen.
-      destroySdkMeasurement();
-      closeCamera(streamRef.current);
-      streamRef.current = null;
-    };
-  }, []);
+    const video = videoRef.current;
+    if (!video) return;
+    if (video.srcObject !== stream) video.srcObject = stream;
+  }, [stream]);
 
   // Live frame-rate readout from the track's own counters (or the preview's presentedFrames),
   // divided by real elapsed time. Also re-reads what the driver actually applied.
   useEffect(() => {
     const video = videoRef.current;
-    const track = streamRef.current?.getVideoTracks()[0] as TrackWithStats | undefined;
-    if (!cameraOn || !video || !track) return;
+    const track = stream?.getVideoTracks()[0] as TrackWithStats | undefined;
+    if (!video || !track) return;
 
     let presented = 0;
     let handle = 0;
@@ -193,7 +151,7 @@ export default function CameraSetup() {
         });
       }
       last = now;
-      const s = readSettings(track);
+      const s = readTrackSettings(track);
       setApplied(
         [
           s.exposureMode && `exposure ${s.exposureMode}`,
@@ -210,85 +168,19 @@ export default function CameraSetup() {
       clearInterval(timer);
       setFps(null);
     };
-  }, [cameraOn]);
+  }, [stream]);
 
-  // The SDK locks exposure/white balance once Running; reapply our tuned values.
-  useEffect(() => {
-    const track = streamRef.current?.getVideoTracks()[0];
-    if (measurement.status !== "running" || !track) return;
-    const timer = setTimeout(() => {
-      void applySettings(track, capsRef.current, loadSettings() ?? { manual: true }).catch(() => {});
-    }, 500);
-    return () => clearTimeout(timer);
-  }, [measurement.status]);
-
-  // Any new pulse sample counts as "pulse seen" for the credit guard below.
-  useEffect(() => {
-    if (pulseRate.latest) lastPulseRef.current = Date.now();
-  }, [pulseRate.latest]);
-
-  // Credit guard: stop a running session that has produced no pulse for too long.
-  useEffect(() => {
-    if (!measuring) return;
-    lastPulseRef.current = Date.now();
-    const timer = setInterval(() => {
-      if (Date.now() - lastPulseRef.current > NO_PULSE_TIMEOUT_MS) {
-        setError(`No pulse for ${NO_PULSE_TIMEOUT_MS / 1000} s — stopped to save credits.`);
-        void stopMeasuring();
-      }
-    }, 2000);
-    return () => clearInterval(timer);
-  }, [measuring]);
-
-  async function openCamera() {
-    const stream = await navigator.mediaDevices.getUserMedia({
-      video: {
-        width: { ideal: 640, max: 640 },
-        height: { ideal: 480, max: 480 },
-        frameRate: { ideal: TARGET_FPS },
-        facingMode: "user",
-      },
-      audio: false,
-    });
-    const track = stream.getVideoTracks()[0];
-    const c = (track.getCapabilities?.() ?? {}) as CameraCaps;
-    capsRef.current = c;
-    setCaps(c);
-
-    // Start from the remembered settings, else ~25 ms exposure (headroom under 33 ms/frame).
-    const current = readSettings(track);
-    const initial: CameraSettings = loadSettings() ?? {
-      manual: !!c.exposureMode?.includes("manual"),
-      exposureTime: c.exposureTime ? snap(250, c.exposureTime) : undefined,
-      brightness: current.brightness,
-    };
-    try {
-      await applySettings(track, c, initial);
-    } catch {
-      initial.manual = false;
-    }
+  async function openCameraNow() {
+    const { settings: initial } = await openCamera();
     setSettings(initial);
-
-    streamRef.current = stream;
-    if (videoRef.current) videoRef.current.srcObject = stream;
-    setCameraOn(true);
-  }
-
-  function closeCameraNow() {
-    closeCamera(streamRef.current);
-    streamRef.current = null;
-    if (videoRef.current) videoRef.current.srcObject = null;
-    setCameraOn(false);
   }
 
   async function changeSettings(patch: Partial<CameraSettings>) {
     const next = { ...settings, ...patch };
     setSettings(next);
-    saveSettings(next);
-    const track = streamRef.current?.getVideoTracks()[0];
-    if (!track) return;
+    saveCameraSettings(next);
     try {
-      await applySettings(track, capsRef.current, next);
+      await applyCameraSettings(next);
     } catch (e) {
       setError(`Camera rejected setting: ${e instanceof Error ? e.message : String(e)}`);
     }
@@ -298,10 +190,10 @@ export default function CameraSetup() {
     setBusy(true);
     setError("");
     try {
-      if (cameraOn) closeCameraNow();
-      else await openCamera();
+      if (cameraOn) closeCamera();
+      else await openCameraNow();
     } catch (e) {
-      closeCameraNow();
+      closeCamera();
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
@@ -312,9 +204,9 @@ export default function CameraSetup() {
     setBusy(true);
     setError("");
     try {
-      if (!streamRef.current) await openCamera();
+      if (!cameraOn) await openCameraNow();
       // SDK failures are also published to the shared store (measurement.error).
-      await startSdkMeasurement(streamRef.current!);
+      await startMeasurement();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -325,7 +217,7 @@ export default function CameraSetup() {
   async function stopMeasuring() {
     setBusy(true);
     try {
-      await stopSdkMeasurement();
+      await stopMeasurement();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -381,6 +273,21 @@ export default function CameraSetup() {
           {busy ? "…" : measuring ? "Stop measuring" : "2. Measure (uses credits)"}
         </button>
       </div>
+
+      {sdkMeasuring && (
+        <div className="flex max-w-xl flex-col items-center gap-2 text-center">
+          <Link
+            href="/explore"
+            className="rounded-full bg-teal-200 px-6 py-2 font-medium text-zinc-950 hover:bg-teal-100"
+          >
+            3. Continue to Explore →
+          </Link>
+          <p className="text-xs text-zinc-500">
+            Measuring carries on in Explore. It stops automatically if no pulse is read for{" "}
+            {NO_PULSE_TIMEOUT_MS / 1000} s, and when you go back to the Welcome page.
+          </p>
+        </div>
+      )}
 
       {cameraOn && (
         <div className="grid w-full max-w-xl gap-3 text-sm">
