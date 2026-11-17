@@ -6,3 +6,13 @@ export {
   stopSdkMeasurement,
   destroySdkMeasurement,
 } from "./smartspectra.source";
+// Development-only, clearly labelled simulation (disabled in production builds).
+export {
+  SIMULATION_AVAILABLE,
+  startSimulation,
+  stopSimulation,
+  isSimulationRunning,
+  isSimulatedSignalLost,
+  setSimulatedSignalLost,
+  subscribeSimulation,
+} from "./simulation.source";
