@@ -7,6 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
+    "test": "node --test \"src/**/*.test.ts\"",
     "build:electron": "tsc -p electron --noEmit && node scripts/build-electron.mjs",
     "electron:dev": "concurrently -k -n next,electron \"next dev\" \"wait-on http-get://localhost:3000 && npm run build:electron && node scripts/start-electron.mjs\""
   },

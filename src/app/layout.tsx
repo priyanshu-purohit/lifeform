@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import { Suspense } from "react";
 import { MeasurementLifecycle } from "@/components/measurement-lifecycle";
+import { SessionRecorder } from "@/components/session-recorder";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -32,6 +33,8 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
         <Suspense fallback={null}>
           <MeasurementLifecycle />
         </Suspense>
+        {/* Saves a local summary of each session when it ends, on any route. */}
+        <SessionRecorder />
       </body>
     </html>
   );
