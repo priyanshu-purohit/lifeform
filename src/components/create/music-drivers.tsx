@@ -52,7 +52,8 @@ const ROWS: readonly Row[] = [
 
 const percent = (v: number) => `${Math.round(v * 100)}%`;
 
-function effect(id: MetricId, targets: MusicTargets, tempoBpm: number): string {
+/** One line describing what a metric is doing to the music. */
+export function effectText(id: MetricId, targets: MusicTargets, tempoBpm: number): string {
   if (id === "pulseRate") {
     const trend = targets.trend > 0.15 ? " · building" : targets.trend < -0.15 ? " · easing" : "";
     return `Tempo ${Math.round(tempoBpm)} beats/min · rhythm ${percent(targets.intensity)}${trend}`;
@@ -155,7 +156,7 @@ export function MusicDrivers({
             open={open}
             driving={driving[row.id]}
             influence={influence[row.id]}
-            text={effect(row.id, targets, tempo)}
+            text={effectText(row.id, targets, tempo)}
           />
         ))}
       </ul>

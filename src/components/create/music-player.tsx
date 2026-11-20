@@ -1,6 +1,6 @@
 "use client";
 
-import type { EngineStatus, LiveEngine } from "@/features/create/audio-engine";
+import type { EngineStatus, MusicEngine } from "@/features/create/audio-engine";
 import { STYLES, chordName, type MusicStyle } from "@/features/create/music-generator";
 import { MusicVisualizer } from "./music-visualizer";
 
@@ -14,18 +14,33 @@ const button =
   "inline-flex h-10 items-center justify-center rounded-full px-6 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-200/70 disabled:cursor-not-allowed disabled:opacity-40";
 
 function nowPlaying(status: EngineStatus): string {
-  if (status.state === "idle") return "Silent until you press Play";
+  if (status.state === "idle") {
+    return status.finished ? "Finished · press Play to hear it again" : "Silent until you press Play";
+  }
   const parts = [status.state === "paused" ? "Paused" : "Playing"];
-  if (status.bar != null) parts.push(`Bar ${status.bar + 1}`);
+  if (status.bar != null) {
+    parts.push(status.totalBars != null ? `Bar ${status.bar + 1} of ${status.totalBars}` : `Bar ${status.bar + 1}`);
+  }
   if (status.chordDegree != null) parts.push(chordName(status.style, status.chordDegree));
   if (status.tempoBpm != null) parts.push(`${Math.round(status.tempoBpm)} beats/min`);
   return parts.join(" · ");
 }
 
-/** Play, pause, resume, stop, volume and style for Live Mode. */
-export function MusicPlayer({ status, engine }: { status: EngineStatus; engine: LiveEngine }) {
+/** Play, pause, resume, stop, volume and style, for Live Mode and Session Mode. */
+export function MusicPlayer({
+  status,
+  engine,
+  unavailable,
+}: {
+  status: EngineStatus;
+  engine: MusicEngine;
+  /** Why there is nothing to play (Session Mode with no usable session), or undefined. */
+  unavailable?: string;
+}) {
   const playing = status.state === "playing";
   const idle = status.state === "idle";
+  const progress =
+    status.totalBars != null && status.bar != null ? (status.bar + 1) / status.totalBars : status.finished ? 1 : 0;
 
   return (
     <section
@@ -35,8 +50,21 @@ export function MusicPlayer({ status, engine }: { status: EngineStatus; engine: 
       <MusicVisualizer getAnalyser={engine.getAnalyser} active={playing} />
 
       <p aria-live="polite" className="font-mono text-[11px] uppercase tracking-[0.25em] text-zinc-400">
-        {nowPlaying(status)}
+        {unavailable && idle ? unavailable : nowPlaying(status)}
       </p>
+
+      {status.mode === "session" && (
+        <div
+          role="progressbar"
+          aria-label="Position in the piece"
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={Math.round(progress * 100)}
+          className="h-1 overflow-hidden rounded-full bg-zinc-800"
+        >
+          <div className="h-full rounded-full bg-teal-200/80 transition-[width] duration-500" style={{ width: `${progress * 100}%` }} />
+        </div>
+      )}
 
       <div className="flex flex-wrap items-center gap-3">
         {playing ? (
@@ -51,6 +79,7 @@ export function MusicPlayer({ status, engine }: { status: EngineStatus; engine: 
           <button
             type="button"
             onClick={() => void engine.play()}
+            disabled={unavailable != null}
             className={`${button} bg-teal-200 font-medium text-zinc-950 hover:bg-teal-100`}
           >
             {idle ? "Play" : "Resume"}

@@ -2,9 +2,10 @@
 //
 // - createInstrument: the synthesizer. It is written against BaseAudioContext, so the same
 //   code plays live (AudioContext) and renders to a file (OfflineAudioContext).
-// - createLiveEngine: the live scheduler. Once per bar it reads the musical targets and
-//   schedules that bar's notes on the audio clock. Measurements can update at any time,
-//   but the music only changes at a bar line, and every change glides.
+// - createMusicEngine: the scheduler. Once per bar it schedules that bar's notes on the
+//   audio clock. In Live Mode it reads the current musical targets, so measurements can
+//   update at any time but the music only changes at a bar line, and every change glides.
+//   In Session Mode it plays a plan made from a saved session, bar by bar, to its end.
 //
 // Nothing here runs at import time, so the module is safe to load during server rendering.
 // An AudioContext is created only inside play(), which must be called from a user gesture.
@@ -17,16 +18,9 @@ import {
   type NoteEvent,
 } from "./music-generator.ts";
 import type { MusicDrivers, MusicTargets } from "./music-mapping.ts";
+import { nextTempo, type SessionPlan } from "./session-music.ts";
 
 export const midiToHz = (midi: number) => 440 * 2 ** ((midi - 69) / 12);
-
-/** The most the tempo may change from one bar to the next, in beats per minute. */
-export const MAX_TEMPO_STEP = 3;
-
-/** Moves the tempo toward its target by at most MAX_TEMPO_STEP. */
-export function nextTempo(current: number, target: number): number {
-  return current + Math.max(-MAX_TEMPO_STEP, Math.min(MAX_TEMPO_STEP, target - current));
-}
 
 /** Overall brightness: more data and a higher pulse open the filter. Returns Hz. */
 export function toneCutoffHz(targets: MusicTargets): number {
@@ -334,6 +328,12 @@ export type EngineState = "idle" | "playing" | "paused";
 /** Everything the UI reads. Immutable: a new object on every change. */
 export interface EngineStatus {
   state: EngineState;
+  /** "session" while a saved session's plan is loaded; otherwise live measurements. */
+  mode: "live" | "session";
+  /** Bars in the loaded session plan, or null in Live Mode (which has no end). */
+  totalBars: number | null;
+  /** true after a session piece has played to its end; cleared by the next play. */
+  finished: boolean;
   style: MusicStyle;
   /** 0..1. */
   volume: number;
@@ -348,6 +348,9 @@ export interface EngineStatus {
 
 export const IDLE_STATUS: EngineStatus = Object.freeze({
   state: "idle",
+  mode: "live",
+  totalBars: null,
+  finished: false,
   style: "ambient",
   volume: 0.8,
   bar: null,
@@ -357,13 +360,18 @@ export const IDLE_STATUS: EngineStatus = Object.freeze({
   error: null,
 });
 
-export interface LiveEngine {
+export interface MusicEngine {
   subscribe(listener: () => void): () => void;
   getStatus(): EngineStatus;
   /** Starts, or resumes after a pause. Call from a user gesture (browser audio policy). */
   play(): Promise<void>;
   pause(): Promise<void>;
   stop(): void;
+  /**
+   * Loads a session plan to play instead of live measurements, or null to return to Live
+   * Mode. Stops whatever is playing.
+   */
+  setPlan(plan: SessionPlan | null): void;
   /** Takes effect at the next bar line. */
   setStyle(style: MusicStyle): void;
   setVolume(volume: number): void;
@@ -376,14 +384,16 @@ const LOOKAHEAD_S = 0.3;
 const TICK_MS = 25;
 const START_DELAY_S = 0.1;
 const STOP_FADE_S = 0.12;
+/** After the last bar of a session piece, its notes ring out this long before the stop. */
+export const ENDING_TAIL_S = 2.5;
 
 /**
- * @param readTargets Called once per bar for the current musical targets. Keeping it a
- * callback leaves the engine independent of where measurements come from.
+ * @param readTargets Called once per bar in Live Mode for the current musical targets.
+ * Keeping it a callback leaves the engine independent of where measurements come from.
  */
-export function createLiveEngine(
+export function createMusicEngine(
   readTargets: () => { targets: MusicTargets; drivers: MusicDrivers },
-): LiveEngine {
+): MusicEngine {
   let status: EngineStatus = IDLE_STATUS;
   const listeners = new Set<() => void>();
   let ctx: AudioContext | null = null;
@@ -393,6 +403,18 @@ export function createLiveEngine(
   let bar = 0;
   let tempo = 0;
   let seed = "";
+  let plan: SessionPlan | null = null;
+  /** Audio-clock time at which a finished session piece stops, or null while bars remain. */
+  let endAt: number | null = null;
+
+  /** What survives a stop: the user's choices and the loaded plan. */
+  const idle = (): EngineStatus => ({
+    ...IDLE_STATUS,
+    style: status.style,
+    volume: status.volume,
+    mode: plan ? "session" : "live",
+    totalBars: plan ? plan.bars.length : null,
+  });
 
   function set(patch: Partial<EngineStatus>) {
     status = { ...status, ...patch };
@@ -400,8 +422,20 @@ export function createLiveEngine(
   }
 
   function scheduleBar(synth: Instrument) {
-    const { targets } = readTargets();
-    tempo = bar === 0 ? targets.tempoBpm : nextTempo(tempo, targets.tempoBpm);
+    let targets: MusicTargets;
+    if (plan) {
+      const planned = plan.bars[bar];
+      if (!planned) {
+        // The piece is over: let the last notes ring, then stop (see tick).
+        endAt = nextBarTime + ENDING_TAIL_S;
+        return;
+      }
+      targets = planned.targets;
+      tempo = planned.tempoBpm;
+    } else {
+      targets = readTargets().targets;
+      tempo = bar === 0 ? targets.tempoBpm : nextTempo(tempo, targets.tempoBpm);
+    }
     const secondsPerBeat = 60 / tempo;
     const style = status.style;
     // The generator plans phrases at the tempo that is really playing.
@@ -415,10 +449,17 @@ export function createLiveEngine(
 
   function tick() {
     if (!ctx || !instrument) return;
+    if (endAt != null) {
+      if (ctx.currentTime >= endAt) {
+        release(true);
+        set({ ...idle(), finished: true });
+      }
+      return;
+    }
     // After a long stall (sleep, a throttled timer) continue from now instead of rushing
     // through every missed bar.
     if (nextBarTime < ctx.currentTime - 0.05) nextBarTime = ctx.currentTime + 0.05;
-    while (nextBarTime < ctx.currentTime + LOOKAHEAD_S) scheduleBar(instrument);
+    while (endAt == null && nextBarTime < ctx.currentTime + LOOKAHEAD_S) scheduleBar(instrument);
   }
 
   function startTimer() {
@@ -471,19 +512,19 @@ export function createLiveEngine(
           instrument = createInstrument(audio, status.volume);
           await audio.resume();
           if (ctx !== audio) return; // stopped while starting
-          seed = `live-${Date.now()}`;
+          // A session piece is seeded by its session, so it is the same every time.
+          seed = plan ? plan.seed : `live-${Date.now()}`;
           bar = 0;
+          endAt = null;
           nextBarTime = audio.currentTime + START_DELAY_S;
         }
-        set({ state: "playing", error: null });
+        set({ state: "playing", error: null, finished: false });
         startTimer();
         tick();
       } catch (e) {
         release(false);
         set({
-          ...IDLE_STATUS,
-          style: status.style,
-          volume: status.volume,
+          ...idle(),
           error: `Audio could not start: ${e instanceof Error ? e.message : String(e)}`,
         });
       }
@@ -500,7 +541,16 @@ export function createLiveEngine(
     stop() {
       if (status.state === "idle") return;
       release(true);
-      set({ ...IDLE_STATUS, style: status.style, volume: status.volume });
+      set(idle());
+    },
+
+    setPlan(next) {
+      // A plan is fully determined by its session, so reloading the same session (the
+      // saved list refreshed) must not interrupt it.
+      if (next === plan || (next && plan && next.sessionId === plan.sessionId)) return;
+      release(true);
+      plan = next;
+      set(idle());
     },
 
     setStyle(style) {

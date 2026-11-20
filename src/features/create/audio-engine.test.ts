@@ -2,7 +2,8 @@
 // tests cover the pure rules; the synthesizer and scheduler are checked in the app.
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { IDLE_STATUS, MAX_TEMPO_STEP, createLiveEngine, midiToHz, nextTempo, toneCutoffHz } from "./audio-engine.ts";
+import { IDLE_STATUS, createMusicEngine, midiToHz, toneCutoffHz } from "./audio-engine.ts";
+import { MAX_TEMPO_STEP, nextTempo } from "./session-music.ts";
 import { RESTING_MUSIC } from "./music-mapping.ts";
 
 describe("midiToHz", () => {
@@ -31,9 +32,9 @@ describe("toneCutoffHz", () => {
   });
 });
 
-describe("createLiveEngine", () => {
+describe("createMusicEngine", () => {
   const drivers = { pulse: false, breathing: false, hrv: false };
-  const engine = () => createLiveEngine(() => ({ targets: RESTING_MUSIC, drivers }));
+  const engine = () => createMusicEngine(() => ({ targets: RESTING_MUSIC, drivers }));
 
   it("starts idle without touching Web Audio", () => {
     const live = engine();
@@ -55,6 +56,26 @@ describe("createLiveEngine", () => {
     unsubscribe();
     live.setVolume(0.2);
     assert.equal(calls, 2);
+  });
+
+  it("switches between Live Mode and a session plan", () => {
+    const live = engine();
+    const bar = { startSeconds: 0, tempoBpm: 72, sessionMs: 0, targets: RESTING_MUSIC, drivers };
+    const plan = {
+      seed: "s",
+      sessionId: "s",
+      bars: [bar, { ...bar, startSeconds: 3.3 }],
+      durationSeconds: 6.6,
+      sessionSeconds: 20,
+      compressed: false,
+      coverage: { pulse: 0, breathing: 0, hrv: 0 },
+    };
+    live.setPlan(plan);
+    assert.equal(live.getStatus().mode, "session");
+    assert.equal(live.getStatus().totalBars, 2);
+    live.setPlan(null);
+    assert.equal(live.getStatus().mode, "live");
+    assert.equal(live.getStatus().totalBars, null);
   });
 
   it("reports a clear error when audio is unavailable", async () => {
