@@ -4,6 +4,7 @@ import { RESTING_MUSIC, type MusicTargets } from "./music-mapping.ts";
 import {
   BEATS_PER_BAR,
   STYLES,
+  chordName,
   chordPitchClasses,
   generateBar,
   isInScale,
@@ -183,6 +184,15 @@ describe("generateBar", () => {
         assert.equal(generateBar({ style, bar: bar + loop, seed: "s", targets: FULL }).chordDegree, degree);
       }
     }
+  });
+});
+
+describe("chordName", () => {
+  it("names each style's progression", () => {
+    const names = (style: MusicStyle) => STYLES[style].progression.map((degree) => chordName(style, degree));
+    assert.deepEqual(names("ambient"), ["Dm", "C", "G", "Dm"]);
+    assert.deepEqual(names("organic"), ["G", "D", "Em", "C"]);
+    assert.deepEqual(names("electronic"), ["Am", "F", "C", "G"]);
   });
 });
 

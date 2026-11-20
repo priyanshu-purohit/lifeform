@@ -165,6 +165,17 @@ export function chordPitchClasses(style: MusicStyle, bar: number): number[] {
   return [0, 2, 4].map((step) => pitchClass(preset, degree + step));
 }
 
+const NOTE_NAMES = ["C", "C♯", "D", "E♭", "E", "F", "F♯", "G", "A♭", "A", "B♭", "B"] as const;
+
+/** Display name of the chord on a scale degree, e.g. "Dm" or "G". */
+export function chordName(style: MusicStyle, degree: number): string {
+  const preset = STYLES[style];
+  const root = pitchClass(preset, degree);
+  const third = (pitchClass(preset, degree + 2) - root + 12) % 12;
+  const fifth = (pitchClass(preset, degree + 4) - root + 12) % 12;
+  return NOTE_NAMES[root] + (fifth === 6 ? "dim" : third === 3 ? "m" : "");
+}
+
 function chordDegreeAt(preset: StylePreset, bar: number): number {
   const step = Math.floor(bar / preset.barsPerChord) % preset.progression.length;
   return preset.progression[step];

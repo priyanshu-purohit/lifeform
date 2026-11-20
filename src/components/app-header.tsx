@@ -14,7 +14,7 @@ type Experience = "Explore" | "Understand" | "Create";
 const NAV: readonly { name: Experience; href: string; ready: boolean }[] = [
   { name: "Explore", href: "/explore", ready: true },
   { name: "Understand", href: "/understand", ready: true },
-  { name: "Create", href: "/create", ready: false },
+  { name: "Create", href: "/create", ready: true },
 ];
 
 export function StatusChip({ snapshot }: { snapshot: MeasurementSnapshot }) {
