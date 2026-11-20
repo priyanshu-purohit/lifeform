@@ -7,7 +7,7 @@ export type {
   SeriesPoint,
   SessionSummary,
 } from "./session.types";
-export { buildSessionSummary } from "./session-summary";
+export { MIN_VALID_SAMPLES, buildSessionSummary } from "./session-summary";
 export {
   deleteAllSessions,
   deleteSession,

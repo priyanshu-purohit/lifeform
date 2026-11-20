@@ -8,8 +8,6 @@ import {
   isSimulationRunning,
   setSimulatedSignalLost,
   startSimulation,
-  stopMeasurement,
-  stopSimulation,
   subscribeSimulation,
   type MeasurementSnapshot,
 } from "@/features/measurements";
@@ -18,12 +16,7 @@ import { useMeasurements } from "@/hooks/use-measurements";
 import { ExploreWorld } from "./explore-world";
 import { ExploreReadings } from "./explore-readings";
 import { ExploreControls } from "./explore-controls";
-
-const NAV = [
-  { name: "Explore", href: "/explore", ready: true },
-  { name: "Understand", href: "/understand", ready: false },
-  { name: "Create", href: "/create", ready: false },
-] as const;
+import { AppHeader } from "@/components/app-header";
 
 function useSimulation() {
   const running = useSyncExternalStore(subscribeSimulation, isSimulationRunning, () => false);
@@ -41,32 +34,6 @@ function phaseOf(s: MeasurementSnapshot): Phase {
   if (metrics.some((m) => m.freshness === "live")) return "live";
   if (metrics.some((m) => m.freshness === "stale")) return "lost";
   return "searching";
-}
-
-function StatusChip({ snapshot }: { snapshot: MeasurementSnapshot }) {
-  const open = snapshot.session != null && snapshot.session.endedAt == null;
-  if (open && snapshot.session?.source === "simulation") {
-    return (
-      <span className="flex items-center gap-2 rounded-full border border-amber-400/40 bg-amber-950/50 px-3 py-1 font-mono text-[11px] text-amber-200 backdrop-blur">
-        <span aria-hidden="true" className="size-1.5 rounded-full bg-amber-300" />
-        Simulated data · not a camera reading
-      </span>
-    );
-  }
-  if (open) {
-    return (
-      <span className="flex items-center gap-2 rounded-full border border-teal-400/40 bg-teal-950/40 px-3 py-1 font-mono text-[11px] text-teal-100 backdrop-blur">
-        <span aria-hidden="true" className="size-1.5 animate-pulse rounded-full bg-red-400" />
-        Camera on · measuring
-      </span>
-    );
-  }
-  return (
-    <span className="flex items-center gap-2 rounded-full border border-zinc-800 bg-zinc-950/60 px-3 py-1 font-mono text-[11px] text-zinc-400 backdrop-blur">
-      <span aria-hidden="true" className="size-1.5 rounded-full bg-zinc-600" />
-      Not measuring
-    </span>
-  );
 }
 
 const button =
@@ -89,6 +56,11 @@ function RestingCard({ phase, onSimulate }: { phase: "resting" | "ended"; onSimu
         <Link href="/setup" className={`${button} bg-teal-200 font-medium text-zinc-950 hover:bg-teal-100`}>
           Go to measurement setup →
         </Link>
+        {phase === "ended" && (
+          <Link href="/understand" className={`${button} border border-zinc-700 text-zinc-200 hover:border-teal-300/60`}>
+            See your session →
+          </Link>
+        )}
         {SIMULATION_AVAILABLE && (
           <button
             type="button"
@@ -138,20 +110,6 @@ export function ExploreExperience() {
     }
   }
 
-  async function stop() {
-    setActionError("");
-    if (simulated) {
-      stopSimulation();
-      return;
-    }
-    try {
-      // Ends the session; MeasurementLifecycle then switches the camera off.
-      await stopMeasurement();
-    } catch (e) {
-      setActionError(e instanceof Error ? e.message : String(e));
-    }
-  }
-
   const guidance = snapshot.guidance?.hint;
   const sdkError = snapshot.error?.message;
 
@@ -161,48 +119,7 @@ export function ExploreExperience() {
 
       {/* Overlay UI. The wrapper ignores the pointer so the world stays interactive. */}
       <div className="pointer-events-none relative z-10 flex min-h-svh flex-col">
-        <header className="pointer-events-auto flex flex-wrap items-center justify-between gap-4 px-6 py-5 sm:px-10">
-          <Link href="/" className="font-mono text-xs tracking-[0.4em] text-zinc-400 hover:text-zinc-200">
-            LIFEFORM
-          </Link>
-          <nav aria-label="Experiences">
-            <ul className="flex items-center gap-1 rounded-full border border-zinc-800/70 bg-zinc-950/50 p-1 backdrop-blur-md">
-              {NAV.map((item, i) => (
-                <li key={item.name}>
-                  {item.ready ? (
-                    <Link
-                      href={item.href}
-                      aria-current={item.name === "Explore" ? "page" : undefined}
-                      className="block rounded-full bg-zinc-100/10 px-4 py-1.5 font-mono text-[11px] uppercase tracking-[0.25em] text-teal-100"
-                    >
-                      <span className="text-zinc-500">0{i + 1}</span> {item.name}
-                    </Link>
-                  ) : (
-                    <span
-                      aria-disabled="true"
-                      title="Coming soon"
-                      className="block cursor-not-allowed px-4 py-1.5 font-mono text-[11px] uppercase tracking-[0.25em] text-zinc-600"
-                    >
-                      0{i + 1} {item.name}
-                    </span>
-                  )}
-                </li>
-              ))}
-            </ul>
-          </nav>
-          <div className="flex items-center gap-2">
-            <StatusChip snapshot={snapshot} />
-            {open && (
-              <button
-                type="button"
-                onClick={() => void stop()}
-                className="rounded-full border border-zinc-700 bg-zinc-950/60 px-3 py-1 font-mono text-[11px] text-zinc-200 backdrop-blur hover:border-red-400/60 hover:text-red-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-300/60"
-              >
-                {simulated ? "Stop simulation" : "Stop"}
-              </button>
-            )}
-          </div>
-        </header>
+        <AppHeader current="Explore" className="pointer-events-auto" />
 
         {/* Centre: state messages. */}
         <main className="flex flex-1 flex-col items-center justify-start gap-3 px-6 pt-4">
