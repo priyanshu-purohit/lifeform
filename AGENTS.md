@@ -173,13 +173,22 @@ Provide:
 - Volume control.
 - Style selection.
 - Session-based generation.
-- Audio export.
 
 Music must be generated locally.
 
 Handle browser audio restrictions and ensure audio begins only after appropriate user interaction.
 
 Avoid generating uncontrolled audio changes whenever a measurement updates. Use smoothing, musical quantization, and scheduled transitions.
+
+### Extra feature for later: audio export
+
+Not part of the current build. Add it only if time allows after the rest of CREATE is polished and verified.
+
+- Export a Session Mode piece as a WAV file the user can save.
+- Render it offline with `OfflineAudioContext`, reusing the same instrument and bar scheduling as playback, so the file matches what the user hears.
+- Encode the WAV in TypeScript (`src/features/create/audio-export.ts`); do not add an audio library for it.
+- The same session and style must give the same file.
+- Until it is built, show no export control. Do not leave a disabled or non-working Export button in the interface.
 
 # 5. MANDATORY TECHNOLOGY STACK
 
@@ -370,7 +379,7 @@ CREATE:
 - Session Mode.
 - Musical styles.
 - Playback controls.
-- Audio export.
+- Audio export (extra feature for later; see section 4).
 
 Keep the design consistent across all sections.
 
@@ -465,7 +474,7 @@ src/
       audio-engine.ts
       music-generator.ts
       music-mapping.ts
-      audio-export.ts
+      audio-export.ts    (later, with the audio export extra)
 
     sessions/
       session-manager.ts
