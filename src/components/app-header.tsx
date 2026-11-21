@@ -8,6 +8,7 @@ import {
   type MeasurementSnapshot,
 } from "@/features/measurements";
 import { useMeasurements } from "@/hooks/use-measurements";
+import { formatElapsed, useSessionCost } from "@/hooks/use-credits";
 
 type Experience = "Explore" | "Understand" | "Create";
 
@@ -19,6 +20,7 @@ const NAV: readonly { name: Experience; href: string; ready: boolean }[] = [
 
 export function StatusChip({ snapshot }: { snapshot: MeasurementSnapshot }) {
   const open = snapshot.session != null && snapshot.session.endedAt == null;
+  const cost = useSessionCost(snapshot.session);
   if (open && snapshot.session?.source === "simulation") {
     return (
       <span className="flex items-center gap-2 rounded-full border border-amber-400/40 bg-amber-950/50 px-3 py-1 font-mono text-[11px] text-amber-200 backdrop-blur">
@@ -32,6 +34,9 @@ export function StatusChip({ snapshot }: { snapshot: MeasurementSnapshot }) {
       <span className="flex items-center gap-2 rounded-full border border-teal-400/40 bg-teal-950/40 px-3 py-1 font-mono text-[11px] text-teal-100 backdrop-blur">
         <span aria-hidden="true" className="size-1.5 animate-pulse rounded-full bg-red-400" />
         Camera on · measuring
+        <span className="text-teal-100/60" title="Estimated SDK credits used by this session">
+          {formatElapsed(cost.elapsedMs)} · ~{cost.credits} cr
+        </span>
       </span>
     );
   }

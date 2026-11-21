@@ -11,10 +11,12 @@ export type CameraCaps = {
   brightness?: Range;
 };
 export type CameraSettings = { manual: boolean; exposureTime?: number; brightness?: number };
+export type CameraDevice = { id: string; label: string };
 
 // The SDK needs a sustained ~25+ fps (target 30).
 export const TARGET_FPS = 30;
 const SETTINGS_KEY = "lifeform.cameraSettings";
+const DEVICE_KEY = "lifeform.cameraDeviceId";
 
 let stream: MediaStream | null = null;
 let caps: CameraCaps = {};
@@ -38,9 +40,16 @@ export function getCameraCaps(): CameraCaps {
   return caps;
 }
 
+/** Exposure/brightness are tuned per camera, so they are remembered per camera. */
+function settingsKey(): string {
+  const id = stream?.getVideoTracks()[0]?.getSettings().deviceId;
+  return id ? `${SETTINGS_KEY}:${id}` : SETTINGS_KEY;
+}
+
+/** Settings remembered for the open camera (falls back to the pre-picker, single-camera value). */
 export function loadCameraSettings(): CameraSettings | null {
   try {
-    const raw = localStorage.getItem(SETTINGS_KEY);
+    const raw = localStorage.getItem(settingsKey()) ?? localStorage.getItem(SETTINGS_KEY);
     return raw ? (JSON.parse(raw) as CameraSettings) : null;
   } catch {
     return null;
@@ -49,10 +58,29 @@ export function loadCameraSettings(): CameraSettings | null {
 
 export function saveCameraSettings(s: CameraSettings): void {
   try {
-    localStorage.setItem(SETTINGS_KEY, JSON.stringify(s));
+    localStorage.setItem(settingsKey(), JSON.stringify(s));
   } catch {
     /* storage unavailable: settings just won't be remembered */
   }
+}
+
+function preferredCameraId(): string | null {
+  try {
+    return localStorage.getItem(DEVICE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Cameras the system offers (built-in webcam, USB, virtual cameras such as a phone app).
+ * Empty until the camera has been opened once: the browser hides devices before permission.
+ */
+export async function listCameras(): Promise<CameraDevice[]> {
+  const devices = await navigator.mediaDevices.enumerateDevices();
+  return devices
+    .filter((d) => d.kind === "videoinput" && d.deviceId)
+    .map((d, i) => ({ id: d.deviceId, label: d.label || `Camera ${i + 1}` }));
 }
 
 function snap(value: number, r: Range): number {
@@ -84,16 +112,30 @@ export async function applyCameraSettings(s: CameraSettings): Promise<void> {
 }
 
 async function open(): Promise<MediaStream> {
-  const s = await navigator.mediaDevices.getUserMedia({
-    video: {
-      width: { ideal: 640, max: 640 },
-      height: { ideal: 480, max: 480 },
-      frameRate: { ideal: TARGET_FPS },
-      facingMode: "user",
-    },
-    audio: false,
-  });
+  const base: MediaTrackConstraints = {
+    width: { ideal: 640, max: 640 },
+    height: { ideal: 480, max: 480 },
+    frameRate: { ideal: TARGET_FPS },
+  };
+  const anyCamera = { video: { ...base, facingMode: "user" }, audio: false };
+  const preferred = preferredCameraId();
+  let s: MediaStream;
+  try {
+    s = await navigator.mediaDevices.getUserMedia(
+      preferred ? { video: { ...base, deviceId: { exact: preferred } }, audio: false } : anyCamera,
+    );
+  } catch (e) {
+    // The remembered camera is gone (unplugged, or its phone app is not running): use the
+    // system default instead. Setup shows which camera is really open.
+    const name = (e as { name?: string } | null)?.name;
+    if (!preferred || (name !== "OverconstrainedError" && name !== "NotFoundError")) throw e;
+    s = await navigator.mediaDevices.getUserMedia(anyCamera);
+  }
   const track = s.getVideoTracks()[0];
+  // A camera that goes away by itself (phone disconnected, cable pulled) must not look open.
+  track.addEventListener("ended", () => {
+    if (stream === s) closeCamera();
+  });
   stream = s;
   caps = (track.getCapabilities?.() ?? {}) as CameraCaps;
   emit();
@@ -118,6 +160,19 @@ export async function openCamera(): Promise<{ stream: MediaStream; settings: Cam
     settings.manual = false;
   }
   return { stream: s, settings };
+}
+
+/** Switches to another camera and remembers the choice. Reopens the camera if it was open. */
+export async function selectCamera(
+  id: string,
+): Promise<{ stream: MediaStream; settings: CameraSettings }> {
+  try {
+    localStorage.setItem(DEVICE_KEY, id);
+  } catch {
+    /* storage unavailable: the choice just won't be remembered */
+  }
+  closeCamera();
+  return openCamera();
 }
 
 /** Stops every track so the camera light goes off. */

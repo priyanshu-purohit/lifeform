@@ -8,7 +8,9 @@ import {
   getCameraStream,
   loadCameraSettings,
   openCamera,
+  subscribeCamera,
 } from "./camera.source";
+import { addCreditsUsed, estimateCredits, getSessionLimitMin } from "./credits";
 import { measurementStore } from "./measurement.store";
 import {
   destroySdkMeasurement,
@@ -53,28 +55,38 @@ function startGuard(sessionId: string) {
     }
   });
 
+  /** Stops the session and says why. Each reason is a way a session could waste credits. */
+  function halt(message: string) {
+    dispose();
+    void stopSdkMeasurement()
+      .catch(() => {})
+      .finally(() => {
+        measurementStore.setError({ code: null, message, retryable: true });
+      });
+  }
+
+  // A camera that disappears (phone app disconnected, cable pulled) leaves nothing to measure.
+  const unsubscribeCamera = subscribeCamera(() => {
+    if (!getCameraStream()) halt("The camera disconnected, so measuring stopped to save credits.");
+  });
+
   const interval = setInterval(() => {
     const s = measurementStore.getSnapshot();
     if (s.session?.id !== sessionId || !isSdkSessionOpen(s)) {
       dispose();
       return;
     }
-    if (Date.now() - lastPulseAt > NO_PULSE_TIMEOUT_MS) {
-      dispose();
-      void stopSdkMeasurement()
-        .catch(() => {})
-        .finally(() => {
-          measurementStore.setError({
-            code: null,
-            message: `No pulse for ${NO_PULSE_TIMEOUT_MS / 1000} s, so measuring stopped to save credits.`,
-            retryable: true,
-          });
-        });
+    const limitMin = getSessionLimitMin();
+    if (Date.now() - s.session.startedAt >= limitMin * 60_000) {
+      halt(`Measuring stopped at the ${limitMin} min limit set in Setup, to save credits.`);
+    } else if (Date.now() - lastPulseAt > NO_PULSE_TIMEOUT_MS) {
+      halt(`No pulse for ${NO_PULSE_TIMEOUT_MS / 1000} s, so measuring stopped to save credits.`);
     }
   }, GUARD_CHECK_MS);
 
   function dispose() {
     unsubscribe();
+    unsubscribeCamera();
     clearInterval(interval);
     if (reapplyTimer) clearTimeout(reapplyTimer);
     if (disposeGuard === dispose) disposeGuard = null;
@@ -82,12 +94,27 @@ function startGuard(sessionId: string) {
   disposeGuard = dispose;
 }
 
+/** Adds the session's estimated cost to the local credit tally once it ends, however it ends. */
+function tallyCredits(sessionId: string) {
+  const unsubscribe = measurementStore.subscribe(() => {
+    const session = measurementStore.getSnapshot().session;
+    if (session?.id === sessionId && session.endedAt == null) return;
+    unsubscribe();
+    if (session?.id === sessionId && session.endedAt != null) {
+      addCreditsUsed(estimateCredits(session.endedAt - session.startedAt));
+    }
+  });
+}
+
 /** Starts a real SDK measurement on the shared camera (opening it if needed). Uses credits. */
 export async function startMeasurement(): Promise<void> {
   const stream = getCameraStream() ?? (await openCamera()).stream;
   await startSdkMeasurement(stream);
   const session = measurementStore.getSnapshot().session;
-  if (session) startGuard(session.id);
+  if (session) {
+    startGuard(session.id);
+    tallyCredits(session.id);
+  }
 }
 
 /** Stops the SDK session. The camera is closed by MeasurementLifecycle unless Setup is shown. */

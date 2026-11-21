@@ -6,22 +6,35 @@ import { useRouter } from "next/navigation";
 import { getCameraConsent } from "@/features/privacy/consent";
 import {
   NO_PULSE_TIMEOUT_MS,
+  SECONDS_PER_CREDIT,
+  SESSION_LIMIT_CHOICES_MIN,
   TARGET_FPS,
   applyCameraSettings,
   closeCamera,
   getCameraCaps,
   getCameraStream,
+  listCameras,
   openCamera,
   readTrackSettings,
+  resetCreditsUsedEstimate,
   saveCameraSettings,
+  selectCamera,
+  setSessionLimitMin,
   startMeasurement,
   stopMeasurement,
   subscribeCamera,
+  type CameraDevice,
   type CameraSettings,
   type MeasurementStatus,
   type MetricState,
 } from "@/features/measurements";
 import { useMeasurements } from "@/hooks/use-measurements";
+import {
+  formatElapsed,
+  useCreditsUsed,
+  useSessionCost,
+  useSessionLimitMin,
+} from "@/hooks/use-credits";
 
 // Camera test: does the laptop's built-in webcam work with the SmartSpectra SDK?
 // Uses only real SDK data, read from the shared measurement layer. Nothing is recorded.
@@ -105,11 +118,35 @@ export default function CameraSetup() {
   const [fps, setFps] = useState<FpsReading | null>(null);
   const [settings, setSettings] = useState<CameraSettings>({ manual: true });
   const [applied, setApplied] = useState("");
+  const [cameras, setCameras] = useState<CameraDevice[]>([]);
+
+  const cost = useSessionCost(sdkMeasuring ? measurement.session : null);
+  const creditsUsed = useCreditsUsed();
+  const limitMin = useSessionLimitMin();
 
   // The camera may only be used after explicit consent on the Welcome page.
   useEffect(() => {
     if (!getCameraConsent()) router.replace("/");
   }, [router]);
+
+  // Cameras to choose from. Listed once a camera is open (devices are hidden before
+  // permission) and again whenever one is plugged in or a phone-camera app connects.
+  useEffect(() => {
+    let cancelled = false;
+    const refresh = () => {
+      listCameras()
+        .then((list) => {
+          if (!cancelled) setCameras(list);
+        })
+        .catch(() => {});
+    };
+    refresh();
+    navigator.mediaDevices.addEventListener("devicechange", refresh);
+    return () => {
+      cancelled = true;
+      navigator.mediaDevices.removeEventListener("devicechange", refresh);
+    };
+  }, [stream]);
 
   // Show the shared stream in the preview (also re-attaches when this route is shown again).
   useEffect(() => {
@@ -186,6 +223,20 @@ export default function CameraSetup() {
     }
   }
 
+  async function changeCamera(id: string) {
+    setBusy(true);
+    setError("");
+    try {
+      const { settings: initial } = await selectCamera(id);
+      setSettings(initial);
+    } catch (e) {
+      closeCamera();
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function toggleCamera() {
     setBusy(true);
     setError("");
@@ -233,6 +284,21 @@ export default function CameraSetup() {
     ? `SDK error${measurement.error.code != null ? ` ${measurement.error.code}` : ""}: ${measurement.error.message}`
     : "";
 
+  // What is really open, which can differ from the remembered choice if that camera is gone.
+  const track = stream?.getVideoTracks()[0];
+  const trackSettings = track ? readTrackSettings(track) : null;
+  const activeCameraId = trackSettings?.deviceId ?? "";
+  const device = track
+    ? [
+        track.label || "Unnamed camera",
+        trackSettings?.width && trackSettings.height
+          ? `${trackSettings.width}×${trackSettings.height}`
+          : null,
+      ]
+        .filter(Boolean)
+        .join(" · ")
+    : "";
+
   const fpsOk = fps != null && fps.camera >= MIN_OK_FPS;
   const manualAvailable = !!caps.exposureMode?.includes("manual") && !!caps.exposureTime;
 
@@ -274,6 +340,21 @@ export default function CameraSetup() {
         </button>
       </div>
 
+      <label className="flex items-center gap-2 text-sm text-zinc-400">
+        Stop automatically after
+        <select
+          value={limitMin}
+          onChange={(e) => setSessionLimitMin(Number(e.target.value))}
+          className="rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-zinc-100"
+        >
+          {SESSION_LIMIT_CHOICES_MIN.map((m) => (
+            <option key={m} value={m}>
+              {m} min (~{(m * 60) / SECONDS_PER_CREDIT} credits)
+            </option>
+          ))}
+        </select>
+      </label>
+
       {sdkMeasuring && (
         <div className="flex max-w-xl flex-col items-center gap-2 text-center">
           <Link
@@ -284,13 +365,33 @@ export default function CameraSetup() {
           </Link>
           <p className="text-xs text-zinc-500">
             Measuring carries on in Explore. It stops automatically if no pulse is read for{" "}
-            {NO_PULSE_TIMEOUT_MS / 1000} s, and when you go back to the Welcome page.
+            {NO_PULSE_TIMEOUT_MS / 1000} s, after {limitMin} min, if the camera disconnects, and
+            when you go back to the Welcome page.
           </p>
         </div>
       )}
 
       {cameraOn && (
         <div className="grid w-full max-w-xl gap-3 text-sm">
+          {cameras.length > 0 && (
+            <label className="grid gap-1">
+              <span className="text-zinc-400">
+                Camera{measuring ? " (stop measuring to switch)" : ""}
+              </span>
+              <select
+                value={activeCameraId}
+                disabled={busy || measuring}
+                onChange={(e) => void changeCamera(e.target.value)}
+                className="rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-zinc-100 disabled:opacity-50"
+              >
+                {cameras.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
           {manualAvailable ? (
             <>
               <label className="flex items-center gap-2">
@@ -319,7 +420,10 @@ export default function CameraSetup() {
               )}
             </>
           ) : (
-            <p className="text-zinc-400">This camera does not offer manual exposure.</p>
+            <p className="text-zinc-400">
+              This camera does not offer manual exposure. For a phone-camera app, lock exposure
+              and white balance in the app itself.
+            </p>
           )}
           {caps.brightness ? (
             <label className="grid gap-1">
@@ -342,7 +446,22 @@ export default function CameraSetup() {
       <dl className="grid grid-cols-2 gap-x-6 gap-y-1 font-mono text-sm">
         <dt className="text-zinc-500">SDK status</dt>
         <dd>{STATUS_LABELS[measurement.status]}</dd>
-        <dt className="text-zinc-500">Camera</dt>
+        <dt className="text-zinc-500">Credits (est.)</dt>
+        <dd>
+          {sdkMeasuring ? `${formatElapsed(cost.elapsedMs)} · ~${cost.credits} now · ` : ""}~
+          {creditsUsed} in finished sessions{" "}
+          <button
+            type="button"
+            onClick={resetCreditsUsedEstimate}
+            disabled={creditsUsed === 0}
+            className="text-zinc-500 underline hover:text-zinc-300 disabled:opacity-0"
+          >
+            reset
+          </button>
+        </dd>
+        <dt className="text-zinc-500">Device</dt>
+        <dd>{device || "—"}</dd>
+        <dt className="text-zinc-500">Frame rate</dt>
         <dd className={fps != null && !fpsOk ? "text-red-400" : undefined}>
           {fps != null ? `${fps.camera.toFixed(1)} fps` : "—"}
           {fps?.dropped ? ` (${fps.dropped} dropped)` : ""}
