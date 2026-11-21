@@ -332,6 +332,8 @@ export interface EngineStatus {
   mode: "live" | "session";
   /** Bars in the loaded session plan, or null in Live Mode (which has no end). */
   totalBars: number | null;
+  /** The saved session whose plan is loaded, or null in Live Mode. */
+  sessionId: string | null;
   /** true after a session piece has played to its end; cleared by the next play. */
   finished: boolean;
   style: MusicStyle;
@@ -350,6 +352,7 @@ export const IDLE_STATUS: EngineStatus = Object.freeze({
   state: "idle",
   mode: "live",
   totalBars: null,
+  sessionId: null,
   finished: false,
   style: "ambient",
   volume: 0.8,
@@ -414,6 +417,7 @@ export function createMusicEngine(
     volume: status.volume,
     mode: plan ? "session" : "live",
     totalBars: plan ? plan.bars.length : null,
+    sessionId: plan ? plan.sessionId : null,
   });
 
   function set(patch: Partial<EngineStatus>) {

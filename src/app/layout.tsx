@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import { Suspense } from "react";
 import { MeasurementLifecycle } from "@/components/measurement-lifecycle";
+import { MusicLifecycle } from "@/components/music-lifecycle";
 import { SessionRecorder } from "@/components/session-recorder";
 import "./globals.css";
 
@@ -32,6 +33,8 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
         {/* Keeps one measurement session alive across routes and switches the camera off when unused. */}
         <Suspense fallback={null}>
           <MeasurementLifecycle />
+          {/* Lets Create's music play across the three experiences; stops it on Welcome and Setup. */}
+          <MusicLifecycle />
         </Suspense>
         {/* Saves a local summary of each session when it ends, on any route. */}
         <SessionRecorder />

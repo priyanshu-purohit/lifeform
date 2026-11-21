@@ -54,8 +54,10 @@ export function CreateExperience() {
   const snapshot = useMeasurements();
   const { status, engine } = useAudio();
   const saved = useSavedSessions();
-  const [mode, setMode] = useState<Mode>("live");
-  const [chosenId, setChosenId] = useState<string | null>(null);
+  // Music keeps playing while the user visits other experiences, so on return the page
+  // starts from what the engine is playing instead of resetting it.
+  const [mode, setMode] = useState<Mode>(() => engine.getStatus().mode);
+  const [chosenId, setChosenId] = useState<string | null>(() => engine.getStatus().sessionId);
   const [actionError, setActionError] = useState("");
   const music = useMemo(() => mapToMusic(snapshot), [snapshot]);
 
@@ -78,10 +80,14 @@ export function CreateExperience() {
 
   // The engine plays the chosen session's plan in Session Mode, live measurements otherwise.
   // Changing either stops what is playing.
-  const loadedPlan = mode === "session" ? plan : null;
+  const sessionsLoaded = saved.sessions != null;
   useEffect(() => {
-    engine.setPlan(loadedPlan);
-  }, [engine, loadedPlan]);
+    if (mode === "live") engine.setPlan(null);
+    else if (plan) engine.setPlan(plan);
+    // No plan once the list has loaded means the session is gone. While it is still
+    // loading, leave the engine alone: it may be playing that session.
+    else if (sessionsLoaded) engine.setPlan(null);
+  }, [engine, mode, plan, sessionsLoaded]);
 
   const phase = phaseOf(snapshot);
   const open = phase !== "resting" && phase !== "ended";
